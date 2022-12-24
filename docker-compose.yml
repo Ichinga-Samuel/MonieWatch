@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  web:
+    build: ./backend
+    volumes:
+      - type: volume
+        source: backend
+        target: /user/moniewatch/
+
+    ports:
+      - 8000:8000
+    command: uvicorn app:app --host 0.0.0.0 --reload
+    
+  worker:
+    build: ./backend
+    command: celery -A utils.worker worker -l info
+    volumes:
+      - type: volume
+        source: backend
+        target: /user/moniewatch/
+    depends_on:
+      - web
+
+volumes:
+  backend:
