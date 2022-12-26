@@ -20,7 +20,7 @@ jobs:
   runs-on: ubuntu-latest
   defaults:
    run:
-    working-directory: MonieWatch/backend
+    working-directory: ./backend
     
   steps:
       - name: pulls code from github repo
@@ -33,7 +33,6 @@ jobs:
           cache: 'pip'
       
       
-      -  uses: actions/checkout@v2
 
       - name: Install dependencies
         run: |
