@@ -57,8 +57,8 @@ class Aggregator(BaseModel):
             await self.profile_update()
             await self.session.close()
         except Exception as ex:
-            await self.session.close()
             logging.error(ex)
+            await self.session.close()
 
     async def update(self, **kwargs):
         orm = await self.orm
@@ -97,6 +97,7 @@ class Aggregator(BaseModel):
         trans.target = target or trans.target
         pdf = await trans.get_pdf()
         if not pdf:
+            logger.error("Unable to generate pdf report")
             return False
         s3 = S3(extra_args={"ACL": "public-read"})
         s3 = await s3(file=pdf)

@@ -1,14 +1,15 @@
 import asyncio
+from json import JSONDecodeError
 import random
 import datetime
 from typing import Iterable
 from logging import getLogger
 
-from httpx import AsyncClient
+from httpx import AsyncClient, RequestError, Headers
 
 from .env import env
+from .task_queue import Worker
 from .data_models import Agent, Auth, Transaction, Profile
-
 
 logger = getLogger()
 
@@ -16,34 +17,46 @@ logger = getLogger()
 class ClientTransaction:
     def __init__(self, auth: Auth):
         self.auth = auth
-        self.headers = {"authority": env.AUTHORITY, "origin": env.ORIGIN, "referer": env.REFERER, "client-type": "WEB", "client-version": "0.0.0"}
+        self.headers = Headers(
+            {"authority": env.AUTHORITY, "origin": env.ORIGIN, "referer": env.REFERER, "client-type": "WEB", "client-version": "0.0.0"})
         self.params = {"pageNumber": 1, "pageSize": 1000}
         self.url = env.API_URL
         self.client = AsyncClient(base_url=self.url, headers=self.headers)
-        self.maximum_backoff = 20
-        self.cache = {}
 
     @property
     def is_auth(self):
         return self.auth.status
 
-    async def authenticate(self, retries=3, backoff=1):
+    async def authenticate(self, trie=0):
         try:
             data = {"username": self.auth.username, "password": self.auth.password, "secret": self.auth.password,
                     **self.device}
             res = await self.client.post("/auth/tokens", json=data)
             res = res.json()
+
+            if not isinstance(res, dict):
+                raise TypeError("Invalid Response")
+
+            if res.get('responseCode') == 'invalid_grant':
+                logger.warning("Wrong Password")
+                return False
+
             token = res['tokenData']['access_token']
             self.client.headers['Authorization'] = self.headers['Authorization'] = f"Bearer {token}"
             self.auth.status = True
             self.auth.token = f"Bearer {token}"
             return True
+        except (RequestError, TypeError, JSONDecodeError) as err:
+            if trie > 2:
+                await asyncio.sleep(self.backoff(trie=trie))
+                trie = trie + 1
+                await self.authenticate(trie=trie)
+
+            logger.error(err)
+            return False
+
         except Exception as err:
-            if retries > 0:
-                await asyncio.sleep(self.get_backoff(backoff=backoff))
-                await self.authenticate(retries=retries-1, backoff=backoff+1)
-            print(err, "Unable to authenticate")
-            self.auth.status = False
+            logger.error(err)
             return False
 
     @property
@@ -56,101 +69,106 @@ class ClientTransaction:
             "deviceUniqueIdentifier": dui,
         }
 
-    def get_backoff(self, backoff):
-        return min(self.maximum_backoff, backoff**2 + random.randint(100, 1000))
+    @staticmethod
+    def backoff(self, trie=0):
+        return min(64, 2 ** trie + (random.randint(1, 1000)) / 1000)
 
     async def profile(self):
-        res = await self.get_json(url="/profiles/aggregators")
-        profile = res['profile']
-        name = profile.get("firstName", "").title() + " " + profile.get("lastName", "").title()
-        mobile = int(profile.get('mobileNumber', 0))
-        profile = Profile(name=name, mobile=mobile)
-        return profile
+        try:
+            res = await self.get_json(url="/profiles/aggregators")
+            profile = res['profile']
+            name = profile.get("firstName", "").title() + " " + profile.get("lastName", "").title()
+            mobile = int(profile.get('mobileNumber', 0))
+            profile = Profile(name=name, mobile=mobile)
+            return profile
+        except Exception as err:
+            logger.warning(err)
 
-    async def get_consolidated_transactions(self, *, start_date: datetime.date, end_date: datetime.date, agent_id: int = 0) -> list[Transaction]:
-        start_date, end_date = start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
-        params = {**self.params, "startDate": start_date, "endDate": end_date, "amount": 0, "terminalId": 0, "hardwareTerminalId": 0,
-                  "agentId": agent_id or "", "status": "COMPLETED", "reference": ""}
-        url = "/aggregators/consolidated-transactions/"
-        res = await self.get_json(url=url, params=params)
-        if not res:
-            return []
-        pages = res.get('totalPages', 1)
-        transactions = [Transaction.create(trans) for trans in res["consolidatedTransactions"] if trans['status'] == "COMPLETED" and
-                        not trans['reversed'] and not trans['shouldBeReversed']]
+    async def get_consolidated_transactions(self, *, start_date: datetime.date, end_date: datetime.date, agent_id: int = 0)\
+            -> list[Transaction] | None:
+        try:
+            params = {**self.params, "startDate": start_date.strftime("%Y-%m-%d"), "endDate": end_date.strftime("%Y-%m-%d"), "amount": 0,
+                      "terminalId": 0, "hardwareTerminalId": 0, "agentId": agent_id or "", "status": "COMPLETED", "reference": ""}
+            url = "/aggregators/consolidated-transactions/"
+            res = await self.get_json(url=url, params=params)
+            consolidated_transactions = res.get("consolidatedTransactions", [])
+            transactions = [Transaction.create(trans) for trans in consolidated_transactions if trans['status'] == "COMPLETED" and
+                            not trans['reversed'] and not trans['shouldBeReversed']]
 
-        async def get_transactions(page_number):
-            nonlocal params
-            params = {**params, "pageNumber": page_number}
-            resp = await self.get_json(url=url, params=params)
-            if not resp or (resp.get("consolidatedTransactions") is not None or []):
-                return []
-            transactions.extend(Transaction.create(trans) for trans in resp["consolidatedTransactions"] if trans['status'] == "COMPLETED" and
-                                not trans['reversed'] and not trans['shouldBeReversed'])
+            if pages := res.get('otherPages', []):
+                for page in pages:
+                    trans = page.get("consolidatedTransactions", [])
+                    transactions.extend(Transaction.create(tran) for tran in trans if tran['status'] == "COMPLETED" and not tran['reversed'] and not
+                    tran['shouldBeReversed'])
 
-        tasks = [get_transactions(i) for i in range(2, pages + 1)]
-        await asyncio.gather(*tasks)
-        return transactions
+            return transactions
+        except Exception as err:
+            logger.warning(err)
+            return
 
-    async def get_agents(self) -> list[Agent]:
+    async def get_agents(self) -> list[Agent] | None:
         try:
             params = {**self.params, "keyword": '', "status": ''}
             url = "/agents"
             data = await self.get_json(url=url, params=params)
-            if not data:
-                return []
-            pages = data.get('totalPages', 1)
-            agents = data.get('agents', [])
-            agents = [Agent(agent_id=agent['id'], name=agent['businessName'].title(), mobile=agent['mobileNumber']) for agent in data['agents']]
+            agents = data['agents']
 
-            async def other_pages(page_number):
-                nonlocal params
-                params = {**params, "pageNumber": page_number}
-                resp = await self.get_json(url=url, params=params)
-                if not resp or resp.get('agents'):
-                    return []
-                agents.extend(Agent(agent_id=agent['id'], name=agent['businessName'], mobile=agent['mobileNumber']) for agent in resp['agents'])
+            if pages := data.get('otherPages', []):
+                for page in pages:
+                    ags = page.get('agents', [])
+                    agents.extend(ags)
 
-            if pages > 1:
-                tasks = [other_pages(i) for i in range(1, pages + 1)]
-                await asyncio.gather(*tasks)
-            return agents
+            return [Agent(agent_id=agent['id'], name=agent['businessName'].title(), mobile=agent['mobileNumber']) for agent in agents]
         except Exception as err:
-            print(err, 'Unable to get agents')
+            logger.warning(err)
 
-    async def get_transactions_by_agents(self, start_date: datetime.date, end_date: datetime.date, agents: list[Agent] | None = None) -> Iterable[
-        Transaction]:
-        agents = agents or await self.get_agents()
-        agent_transactions = []
-        for agent in agents:
-            transactions = await self.get_consolidated_transactions(start_date=start_date, end_date=end_date, agent_id=agent.agent_id)
-            agent_transactions.extend(transactions)
-        return (transaction for transaction in agent_transactions)
+    async def get_transactions_by_agents(self, start_date: datetime.date, end_date: datetime.date, agents: list[Agent] | None = None) -> Iterable[Transaction]:
+        try:
+            agents = agents or await self.get_agents()
+            agent_transactions = []
+            args = [{'start_date': start_date, 'end_date': end_date, 'agent_id': agent.agent_id} for agent in agents]
+            worker = Worker(self.get_consolidated_transactions, args=args, workers=len(agents))
+            await worker.run()
+            [agent_transactions.extend(trans) for trans in worker.responses if trans]
+            return agent_transactions
+        except Exception as exe:
+            logger.warning(exe)
 
-    async def get_json(self, *, url: str, retry=True, retries=3, backoff=1, **kwargs):
+    async def get_json(self, *, url: str, trie=0, paginate=True, **kwargs):
         try:
             res = await self.client.get(url, **kwargs)
-            data = res.json()
-            error = data.get('error')
-            if error == "invalid_token" or error == 'Unauthorized' and retry:
-                await self.authenticate()
-                return await self.get_json(url=url, retry=False, **kwargs)
 
-            if data.get("responseCode") == "20000":
-                return data
+            if res.status_code != 200:
+                raise ValueError("Unsuccessful Request")
 
-            else:
-                if retries > 0:
-                    await asyncio.sleep(self.get_backoff(backoff))
-                    return await self.get_json(url=url, retry=False, retries=retries - 1, backoff=backoff+1, **kwargs)
-            return {}
+            res = res.json()
+            if not isinstance(res, dict):
+                raise TypeError("Invalid Response")
+
+            if res.get("responseCode") == "20000":
+
+                if (pages := res['totalPages']) > 1 and paginate:
+                    worker = Worker(self.get_json, workers=pages)
+                    arg = {'url': url, 'trie': 0, 'paginate': False}
+                    for i in range(2, pages + 1):
+                        kwargs['params']['pageNumber'] = i
+                        arg |= kwargs
+                        worker.add(arg)
+                        await worker.run()
+                    res['otherPages'] = [page for page in worker.responses if page is not None]
+
+                return res
+
+        except (TypeError, RequestError) as err:
+            if trie > 2:
+                await asyncio.sleep(self.backoff(trie=trie))
+                trie = trie + 1
+                return await self.get_json(url=url, trie=trie, **kwargs)
+
+            logger.error(err)
 
         except Exception as err:
-            if retries > 0:
-                await asyncio.sleep(self.get_backoff(backoff))
-                return await self.get_json(url=url, retry=False, retries=retries - 1, backoff=backoff+1, **kwargs)
-            return {}
+            logger.error(err)
 
     async def close(self):
         await self.client.aclose()
-

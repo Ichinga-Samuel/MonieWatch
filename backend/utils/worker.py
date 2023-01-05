@@ -16,7 +16,6 @@ app = Celery('workers', broker=env.celery_broker_url, backend=env.celery_result_
 def get_agents(data: dict):
     aggregator = Aggregator.parse_obj(data)
     cor = aggregator.init()
-    print("init")
     run_async(run(cor))
 
 
