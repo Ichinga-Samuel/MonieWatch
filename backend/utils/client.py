@@ -137,7 +137,6 @@ class ClientTransaction:
     async def get_json(self, *, url: str, trie=0, paginate=True, **kwargs):
         try:
             res = await self.client.get(url, **kwargs)
-
             if res.status_code != 200:
                 raise ValueError("Unsuccessful Request")
 

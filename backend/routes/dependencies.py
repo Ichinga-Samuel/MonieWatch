@@ -1,7 +1,7 @@
 from logging import getLogger
 from datetime import datetime, timedelta, date
 
-from fastapi import HTTPException, Depends, status, Body, Depends
+from fastapi import HTTPException, status, Body, Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
 from jose import JWTError, jwt

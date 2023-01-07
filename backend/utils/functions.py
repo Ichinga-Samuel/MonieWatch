@@ -30,9 +30,11 @@ async def generate_reports(*, start_date: date | None = None, end_date: date | N
 
 async def get_report(*, aggregator: Aggregator, start_date: date | None = None, end_date: date | None = None, target: None | float = None,
                           agents: list[Agent] | None = None, title: str = ""):
-
-    report = await generate_report(aggregator=aggregator, start_date=start_date, end_date=end_date, target=target, agents=agents, title=title)
-    await aggregator.send_report(url=report.url)
+    try:
+        report = await generate_report(aggregator=aggregator, start_date=start_date, end_date=end_date, target=target, agents=agents, title=title)
+        await aggregator.send_report(url=report.url) if report else ...
+    except Exception as err:
+        logger.error(err)
 
 
 async def generate_report(*, aggregator: Aggregator, start_date: date | None = None, end_date: date | None = None, target: None | float = None,
@@ -43,7 +45,7 @@ async def generate_report(*, aggregator: Aggregator, start_date: date | None = N
         res = await aggregator.upload_to_cloud(file=file)
         return await aggregator.save_report(**res)
     except Exception as err:
-        logger.critical(f"{err}: Unable to generate report")
+        logger.error(f"{err}: Unable to generate report")
 
 
 async def run(*coroutines):
@@ -51,4 +53,4 @@ async def run(*coroutines):
         await connect()
         await asyncio.gather(*coroutines, return_exceptions=True)
     except Exception as err:
-        logger.warning(err)
+        logger.critical(err)

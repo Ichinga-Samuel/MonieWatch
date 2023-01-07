@@ -1,5 +1,6 @@
 import datetime
 from typing import Optional, List
+from functools import cache
 import logging
 
 from tortoise.transactions import in_transaction
@@ -40,6 +41,7 @@ class Aggregator(BaseModel):
         return orm
 
     @property
+    @cache
     def session(self) -> ClientTransaction:
         return ClientTransaction(auth=Auth(username=self.username, password=self.password))
 
@@ -62,7 +64,7 @@ class Aggregator(BaseModel):
                 await self.session.close()
                 return True
         except Exception as ex:
-            logging.error(ex)
+            logging.critical(ex, "Unable to get agents")
             await self.session.close()
 
     async def update(self, **kwargs):
@@ -99,6 +101,7 @@ class Aggregator(BaseModel):
                 return transactions
         except Exception as err:
             logger.critical(f"{err}: Unable to generate transactions")
+            await self.session.close()
 
     async def get_pdf(self, *, transactions: Transactions):
         return await transactions.get_pdf()
