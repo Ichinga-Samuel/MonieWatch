@@ -8,7 +8,7 @@ from logging import getLogger
 from httpx import AsyncClient, RequestError, Headers
 
 from .env import env
-from .task_queue import Worker
+from .task_queue import TaskQueue
 from .data_models import Agent, Auth, Transaction, Profile
 
 logger = getLogger()
@@ -46,17 +46,17 @@ class ClientTransaction:
             self.auth.status = True
             self.auth.token = f"Bearer {token}"
             return True
+
         except (RequestError, TypeError, JSONDecodeError) as err:
             if trie > 2:
                 await asyncio.sleep(self.backoff(trie=trie))
                 trie = trie + 1
                 await self.authenticate(trie=trie)
-
-            logger.error(err)
+            logger.error(f"{err}: Unable to authenticate")
             return False
 
         except Exception as err:
-            logger.error(err)
+            logger.error(f"{err}: Unable to authenticate")
             return False
 
     @property
@@ -127,9 +127,9 @@ class ClientTransaction:
             agents = agents or await self.get_agents()
             agent_transactions = []
             args = [{'start_date': start_date, 'end_date': end_date, 'agent_id': agent.agent_id} for agent in agents]
-            worker = Worker(self.get_consolidated_transactions, args=args, workers=len(agents))
-            await worker.run()
-            [agent_transactions.extend(trans) for trans in worker.responses if trans]
+            tasks = TaskQueue(self.get_consolidated_transactions, args=args, workers=len(agents))
+            await tasks.run()
+            [agent_transactions.extend(trans) for trans in tasks.results if trans]
             return agent_transactions
         except Exception as exe:
             logger.warning(exe)
@@ -148,14 +148,14 @@ class ClientTransaction:
             if res.get("responseCode") == "20000":
 
                 if (pages := res['totalPages']) > 1 and paginate:
-                    worker = Worker(self.get_json, workers=pages)
+                    tasks = TaskQueue(self.get_json, workers=pages)
                     arg = {'url': url, 'trie': 0, 'paginate': False}
                     for i in range(2, pages + 1):
                         kwargs['params']['pageNumber'] = i
                         arg |= kwargs
-                        worker.add(arg)
-                        await worker.run()
-                    res['otherPages'] = [page for page in worker.responses if page is not None]
+                        tasks.add(arg)
+                        await tasks.run()
+                    res['otherPages'] = [page for page in tasks.results if page is not None]
 
                 return res
 

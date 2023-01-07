@@ -1,8 +1,12 @@
 from typing import Optional
+from logging import getLogger
+
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
 from pydantic import EmailStr, BaseModel, HttpUrl
 
 from .env import env
+
+logger = getLogger()
 
 config = ConnectionConfig(
     MAIL_USERNAME=env.MAIL_USERNAME,
@@ -42,7 +46,7 @@ class Email(BaseModel):
             await self.fast_mail.send_message(msg)
             return True
         except Exception as exe:
-            print(exe)
+            logger.warning(f"{exe}: Unable to send Email")
             return False
 
 

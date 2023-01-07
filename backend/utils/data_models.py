@@ -1,6 +1,6 @@
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 from datetime import datetime, time
+from functools import cache
 
 from pydantic import BaseModel, Field
 
@@ -26,11 +26,28 @@ class Transaction:
     agent_id: int
     amount: int = 0
 
+    @property
+    @cache
+    def dict(self) -> dict:
+        return asdict(self)
+
+    @property
+    @cache
+    def to_json(self) -> dict:
+        obj = self.dict.copy()
+        obj['time'] = str(obj['time'])
+        return obj
+
     @classmethod
     def create(cls, trans: dict) -> 'Transaction':
         name = trans['agent']['businessName'].title()
         time = datetime.strptime(trans['createdOn'], "%Y-%m-%dT%H:%M:%S.%f%z")
         return cls(business_name=name, time=time, trans_type=trans['transactionType'], amount=trans['amount'], agent_id=trans['agent']['id'])
+
+    @classmethod
+    def from_json(cls, trans: dict) -> 'Transaction':
+        trans['time'] = datetime.strptime(trans['time'], "%Y-%m-%d %H:%M:%S+%f:00")
+        return cls(**trans)
 
 
 @dataclass
@@ -52,6 +69,11 @@ class Profile:
 
 
 class Filter:
+    def __call__(self, *args, **kwargs) -> bool:
+        return True
+
+
+class TimeFilter(Filter):
     def __init__(self, start: time = time(hour=0, minute=0, second=0), end: time = time(hour=23, minute=59, second=59)):
         self.start = start
         self.end = end
@@ -60,8 +82,16 @@ class Filter:
         return self.start <= trans.time.time() <= self.end
 
 
-MorningFilter = Filter(start=time(hour=0, minute=0, second=0), end=time(hour=11, minute=59, second=59))
+class AgentFilter(Filter):
+    def __init__(self, agents: list[int]):
+        self.agents = agents
 
-AfternoonFilter = Filter(start=time(hour=12, minute=0, second=0), end=time(hour=15, minute=59, second=59))
+    def __call__(self, *, trans: Transaction) -> bool:
+        return trans.agent_id in self.agents
 
-EveningFilter = Filter(start=time(hour=16, minute=0, second=0), end=time(hour=23, minute=59, second=59))
+
+MorningFilter = TimeFilter(start=time(hour=0, minute=0, second=0), end=time(hour=11, minute=59, second=59))
+
+AfternoonFilter = TimeFilter(start=time(hour=12, minute=0, second=0), end=time(hour=15, minute=59, second=59))
+
+EveningFilter = TimeFilter(start=time(hour=16, minute=0, second=0), end=time(hour=23, minute=59, second=59))

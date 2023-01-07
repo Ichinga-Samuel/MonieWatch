@@ -1,7 +1,7 @@
 import asyncio
 
 
-class Worker:
+class TaskQueue:
     def __init__(self, coroutine, args: list[dict] = None, workers=0):
         self.queue = asyncio.Queue()
         self.coroutine = coroutine
@@ -9,7 +9,7 @@ class Worker:
         self.workers = workers or len(self.args)
         self.add_all()
         self.tasks = []
-        self.responses = []
+        self.results = []
 
     def add(self, obj: dict):
         self.queue.put_nowait(obj)
@@ -21,7 +21,7 @@ class Worker:
         while True:
             obj = await self.queue.get()
             res = await self.coroutine(**obj)
-            self.responses.append(res)
+            self.results.append(res)
             self.queue.task_done()
 
     def create_tasks(self):

@@ -1,18 +1,18 @@
 import datetime
-from functools import cache
-from typing import Optional, List, Any
+from typing import Optional, List
 import logging
 
+from tortoise.transactions import in_transaction
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field, validator, AnyUrl
 
 from utils.client import ClientTransaction, Auth, Agent
+from utils.data_models import AgentFilter
 from utils.cloud_upload import S3
 from utils.email import ReportEmail
 
 from .tables_orm import AggregatorORM, AgentORM, ReportORM
 from .transaction import Transactions
-
 
 pwd_context = CryptContext(schemes=['bcrypt'], deprecated="auto")
 logger = logging.getLogger()
@@ -40,8 +40,7 @@ class Aggregator(BaseModel):
         return orm
 
     @property
-    @cache
-    def session(self):
+    def session(self) -> ClientTransaction:
         return ClientTransaction(auth=Auth(username=self.username, password=self.password))
 
     @property
@@ -52,10 +51,16 @@ class Aggregator(BaseModel):
 
     async def init(self):
         try:
-            await self.authenticate()
-            await self.update_agents()
-            await self.profile_update()
-            await self.session.close()
+            async with in_transaction():
+                await self.session.authenticate()
+                agents = await self.session.get_agents()
+                aggregator = await self.orm
+                profile = await self.session.profile()
+                await AgentORM.bulk_create(objects=[AgentORM(**agent.dict(), aggregator=aggregator) for agent in agents])
+                await aggregator.update_from_dict(**profile.dict)
+                await aggregator.save(update_fields=tuple(profile.dict.keys()))
+                await self.session.close()
+                return True
         except Exception as ex:
             logging.error(ex)
             await self.session.close()
@@ -65,49 +70,64 @@ class Aggregator(BaseModel):
         await orm.update_from_dict(kwargs)
         await orm.save(update_fields=tuple(kwargs.keys()))
 
-    async def profile_update(self):
-        profile = await self.session.profile()
-        await self.update(**profile.dict)
-
-    async def authenticate(self):
-        await self.session.authenticate()
-        return self.session.is_auth
-
-    def verify_password(plain_password: str, hashed_password: str) -> bool:
+    def verify_password(*, plain_password: str, hashed_password: str) -> bool:
         return pwd_context.verify(plain_password, hashed_password)
 
     async def update_agents(self):
         sess = self.session
+        await self.session.authenticate()
         api_agents = {Agent(**agent.dict()) for agent in await sess.get_agents()}
         db_agents = await self.agents
         new_agents = api_agents - {*db_agents}
         aggregator = await self.orm
         await AgentORM.bulk_create(objects=[AgentORM(**agent.dict(), aggregator=aggregator) for agent in new_agents])
+        await self.session.close()
 
-    async def get_transactions(self, start_date: datetime.date | None = None, end_date: datetime.date | None = None, target: None | float = None,
-                               agents: List[Agent] | None = None, title: str = ""):
-        today = datetime.date.today()
-        start_date = start_date or today
-        end_date = end_date or today
-        title = title or f"Transactions Report for {self.name} {start_date.strftime('%A, %B %d %Y')}"
-        session = self.session
-        agents = agents or await self.agents
-        transactions = await session.get_transactions_by_agents(start_date=start_date, end_date=end_date, agents=agents)
-        trans = Transactions(title=title, transactions=transactions, agents=agents)
-        trans.target = target or trans.target
-        pdf = await trans.get_pdf()
-        if not pdf:
-            logger.error("Unable to generate pdf report")
-            return False
-        s3 = S3(extra_args={"ACL": "public-read"})
-        s3 = await s3(file=pdf)
-        if s3.response.status:
+    async def get_transactions(self, *, start_date: datetime.date | None = None, end_date: datetime.date | None = None, target: float | None,
+                               agents: List[Agent] | None = None, title: str = "") -> Transactions | None:
+        try:
+            today = datetime.date.today()
+            start_date = start_date or today
+            end_date = end_date or today
+            title = title or f"Transactions Report for {self.name} {start_date.strftime('%A, %B %d %Y')}"
+            if await self.session.authenticate():
+                transactions = await self.session.get_consolidated_transactions(start_date=start_date, end_date=end_date)
+                await self.session.close()
+                agents = agents or await self.agents
+                filter = AgentFilter(agents=[agent.agent_id for agent in agents])
+                transactions = Transactions(title=title, transactions=transactions, agents=agents, filter=filter, target=target or 50000)
+                return transactions
+        except Exception as err:
+            logger.critical(f"{err}: Unable to generate transactions")
+
+    async def get_pdf(self, *, transactions: Transactions):
+        return await transactions.get_pdf()
+
+    async def upload_to_cloud(self, *, file) -> dict[str, str]:
+        try:
+            s3 = S3(extra_args={"ACL": "public-read"})
+            s3 = await s3(file=file)
+            if s3.response.status:
+                name = file.name.rsplit('.')[-2]
+                url = s3.response.public_url
+                return {'name': name, 'url': url}
+        except Exception as err:
+            logger.critical(f"{err}: Unable to upload file to cloud")
+
+    async def save_report(self, *, url: str, name: str) -> ReportORM:
+        try:
             agg = await self.orm
-            rep = await ReportORM.create(name=pdf.name.rsplit('.')[-2], url=s3.response.public_url, aggregator=agg)
-            mail = ReportEmail(name=self.name, link=rep.url, recipients=[self.email])
+            rep = await ReportORM.create(name=name, url=url, aggregator=agg)
+            return rep
+        except Exception as err:
+            logger.critical(f"{err}: unable to save report")
+
+    async def send_report(self, *, url):
+        try:
+            mail = ReportEmail(name=self.name, link=url, recipients=[self.email])
             await mail.send()
-        await session.close()
-        return True
+        except Exception as err:
+            logger.critical(f"{err}: unable to send mail")
 
 
 class CreateAggregator(BaseModel):
@@ -138,12 +158,11 @@ class CreateAggregator(BaseModel):
         orm = await AggregatorORM.get(username=self.username)
         return orm
 
-    async def create(self) -> bool:
+    async def create(self) -> AggregatorORM:
         try:
-            await AggregatorORM.create(**self.dict())
-            return True
+            return await AggregatorORM.create(**self.dict())
         except Exception as err:
-            return False
+            logger.critical(f"{err}: Unable to create aggregator")
 
 
 class Report(BaseModel):

@@ -3,10 +3,14 @@ from functools import cache
 from typing import Iterable
 from pathlib import Path
 from pydantic import BaseModel
+from logging import getLogger
 
 from utils.env import env
-from utils.data_models import Transaction, Filter, MorningFilter, AfternoonFilter, EveningFilter, Agent
+from utils.data_models import Transaction, Agent, Filter
 from utils.pdf import BaseDocTemplate, dx, dy, px, py, PageTemplate, ParagraphStyle, DocBuilder, Frame, colors, TableStyle
+
+
+logger = getLogger()
 
 
 class BusinessSummary(BaseModel):
@@ -20,7 +24,7 @@ class BusinessSummary(BaseModel):
 class Transactions(BaseModel):
     title: str
     transactions: Iterable[Transaction]
-    target: float = 10000
+    target: float
     agents: list[Agent] = []
     filter: Filter = Filter()
 
@@ -81,9 +85,9 @@ class TransactionsReport(BaseDocTemplate):
     tabel_styles = TableStyle([("INNERGRID", (0, 0), (-1, -1), 1, colors.black), ("BOX", (0, 0), (-1, -1), 1, colors.black),
                          ("TEXTCOLOR", (1, 0), (1, -1), colors.darkorange), ("TEXTCOLOR", (0, 0), (0, -1), colors.darkgreen)])
 
-    def __init__(self, *, transactions: Transactions, **kwargs):
+    def __init__(self, *, transactions: Transactions, folder="reports", **kwargs):
         self.transactions = transactions
-        self.file = env.BASE / f"reports/{self.transactions.title}.pdf"
+        self.file = env.BASE / f"{folder}/{self.transactions.title}.pdf"
         super().__init__(filename=str(self.file), leftMargin=dx(21), topMargin=dx(29.7), **kwargs)
 
         self.doc = DocBuilder()
@@ -157,4 +161,4 @@ class TransactionsReport(BaseDocTemplate):
             await loop.run_in_executor(None, lambda flowables: self.build(flowables=flowables), self.doc.data)
             return self.file
         except Exception as err:
-            return None
+            logger.critical(f"{err}: Unable to create pdf report.")

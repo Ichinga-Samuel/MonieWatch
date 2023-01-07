@@ -1,11 +1,13 @@
 from logging import getLogger
-import asyncio
 import datetime
 
 from celery import Celery
+from tortoise import run_async
 
-from .functions import add_agents, add_agent, Aggregator, run_async, run, generate_report, Agent
+from .functions import get_report, run
 from .env import env
+
+from models.aggregator import Aggregator, Agent
 
 logger = getLogger()
 
@@ -25,5 +27,5 @@ def get_report(agg: dict, data: dict):
     data['agents'] = [Agent.parse_obj(obj) for obj in data['agents']] if data['agents'] else None
     data['start_date'] = datetime.datetime.strptime(data['start_date'].split("T")[0], "%Y-%m-%d")
     data['end_date'] = datetime.datetime.strptime(data['end_date'].split("T")[0], "%Y-%m-%d")
-    coro = generate_report(aggregator=aggregator, **data)
+    coro = get_report(aggregator=aggregator, **data)
     run_async(run(coro))
