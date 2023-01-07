@@ -91,7 +91,7 @@ async def create_report(target: float = Body(), agents: list[dict] = Body(), sta
     agg = Aggregator(email=aggregator.email, password=aggregator.password, username=aggregator.username, name=aggregator.name)
     agg = agg.dict()
     data = {'target': target, 'start_date': start, 'end_date': end, 'agents': agents}
-    task_id = get_report.delay(agg, data)
+    task_id = get_report.apply_async(args=[agg, data])
     return ResponseModel(message="Your Report Will be Available Shortly", data={'taskId': str(task_id)})
 
 

@@ -2,6 +2,7 @@ import datetime
 from typing import Optional, List
 from functools import cache
 import logging
+from random import randint
 
 from tortoise.transactions import in_transaction
 from passlib.context import CryptContext
@@ -91,7 +92,7 @@ class Aggregator(BaseModel):
             today = datetime.date.today()
             start_date = start_date or today
             end_date = end_date or today
-            title = title or f"Transactions Report for {self.name} {start_date.strftime('%A, %B %d %Y')}"
+            title = title or f"Transactions Report for {self.name} {start_date.strftime('%A, %B %d %Y')} {randint(10, 1010)}"
             if await self.session.authenticate():
                 transactions = await self.session.get_consolidated_transactions(start_date=start_date, end_date=end_date)
                 await self.session.close()

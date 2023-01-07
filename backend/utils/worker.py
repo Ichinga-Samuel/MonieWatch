@@ -15,7 +15,7 @@ app = Celery('workers', broker=env.celery_broker_url, backend="rpc://")
 
 
 @app.task(name="get_agents")
-def get_agents(data: dict):
+async def get_agents(data: dict):
     aggregator = Aggregator.parse_obj(data)
     cor = aggregator.init()
     run_async(run(cor))

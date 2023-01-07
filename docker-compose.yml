@@ -14,7 +14,7 @@ services:
     
   worker:
     build: ./backend
-    command: celery -A utils.worker worker -l info
+    command: celery -A utils.worker worker --pool solo -l info
     volumes:
       - type: volume
         source: backend
